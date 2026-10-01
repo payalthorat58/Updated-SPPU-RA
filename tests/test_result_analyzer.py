@@ -26,6 +26,29 @@ def test_proforma_a_uses_cgpa_for_class_and_atkt():
     assert result["with_atkt_str"] == "9+2=11"
 
 
+def test_proforma_c_ranks_by_sgpa_then_total_marks():
+    analyzer = ResultAnalyzer()
+    students = [
+        {"seat": "A", "name": "Higher marks", "sgpa": "9.50", "cp": 10, "obt": 600, "max": 700},
+        {"seat": "B", "name": "Higher credit points", "sgpa": "9.50", "cp": 200, "obt": 550, "max": 700},
+        {"seat": "C", "name": "Lower SGPA", "sgpa": "9.40", "cp": 999, "obt": 700, "max": 700},
+    ]
+
+    result = analyzer._calculate_proforma_c(students)
+
+    assert [topper["seat"] for topper in result] == ["A", "B", "C"]
+
+
+def test_sgpa_column_prefers_latest_semester_to_compact_summary():
+    columns = {
+        "Semester 7 SGPA": 5,
+        "Semester 8 SGPA": 6,
+        "SGPA": 7,
+    }
+
+    assert ResultAnalyzer._sgpa_column(columns) == 6
+
+
 def test_result_analyzer_generates_abc():
     excel_path = ROOT / "output" / "BE Computer CEGPresult.xlsx"
     if not excel_path.exists():

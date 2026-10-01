@@ -43,7 +43,11 @@ class ExcelWriter:
         # field that is dashes for every student (for example CCE in some
         # 2024 ledgers) still reaches Excel and can look like a broken column.
         active_schema = ExcelWriter._filtered_schema(result)
-        calculated_sgpas = [ExcelWriter._missing_semester_sgpas(student) for student in result.students]
+        all_year_fields = {
+            k for student in result.students for k in student.summary.keys()
+            if k.endswith(" SGPA") and not k.startswith("Semester")
+        }
+        calculated_sgpas = [ExcelWriter._missing_semester_sgpas(student, all_year_fields) for student in result.students]
         summary_fields = list(dict.fromkeys(
             [field for student in result.students for field in student.summary]
             + [field for values in calculated_sgpas for field in values]
@@ -70,7 +74,7 @@ class ExcelWriter:
                 row[("Student Information", "", key)] = value
             for key, value in calculated.items():
                 source_value = student.summary.get(key)
-                if source_value is None or str(source_value).strip() in {"", "-", "---", "----"}:
+                if source_value is None or str(source_value).strip() in {"", "-", "--", "---", "----"}:
                     row[("Student Information", "", key)] = value
             for semester, subjects in student.semesters.items():
                 for label, subject in subjects.items():
@@ -80,7 +84,7 @@ class ExcelWriter:
         return pd.DataFrame(rows, columns=pd.MultiIndex.from_tuples(columns))
 
     @staticmethod
-    def _missing_semester_sgpas(student):
+    def _missing_semester_sgpas(student, all_year_fields=None):
         """Calculate only absent semester/year SGPAs from course grade points and credits."""
 
         def _compute(subjects_map):
@@ -93,7 +97,7 @@ class ExcelWriter:
                 if fields.get("Remark") == "Non-countable credit course":
                     continue
                 grade = str(fields.get("Grd", "")).strip().upper()
-                if grade in {"F", "FF"}:
+                if grade in {"F", "FF", "FX", "IC"}:
                     return None  # failed subject → no SGPA
                 # Empty/dash grade means not graded yet — skip this subject
                 if not grade or set(grade) == {"-"}:
@@ -126,13 +130,19 @@ class ExcelWriter:
                 calculated[summary_field] = result
 
         # Year-level SGPAs (e.g. "Fourth Year SGPA") that exist in summary as
-        # dashes/empty — compute from ALL semesters combined.
-        year_fields = [
-            k for k, v in student.summary.items()
-            if k.endswith(" SGPA")
-            and not k.startswith("Semester")
-            and str(v).strip() in _BLANK
-        ]
+        # dashes/empty or are missing entirely — compute from ALL semesters combined.
+        if all_year_fields is None:
+            all_year_fields = [
+                k for k in student.summary.keys()
+                if k.endswith(" SGPA") and not k.startswith("Semester")
+            ]
+            
+        year_fields = []
+        for k in all_year_fields:
+            v = student.summary.get(k)
+            if v is None or str(v).strip() in _BLANK:
+                year_fields.append(k)
+
         if year_fields:
             all_subjects = {}
             for subjects in student.semesters.values():

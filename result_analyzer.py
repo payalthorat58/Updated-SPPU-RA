@@ -66,29 +66,61 @@ class ResultAnalyzer:
                     if f:
                         subjects[curr_sub]["fields"][str(f).strip()] = c
 
-        # Find Seat, PRN, Name, SGPA, CGPA column indices
+        # Find Seat, PRN, Name, SGPA, CGPA, Result Status column indices
         seat_col = info_cols.get("Seat Number", 1)
         prn_col = info_cols.get("PRN", 2)
         name_col = info_cols.get("Student Name", 3)
         mother_col = info_cols.get("Mother Name", 4)
 
-        # Detect SGPA and CGPA columns
-        sgpa_col = None
+        sgpa_col = self._sgpa_column(info_cols)
         cgpa_col = None
+        status_col = None
         for col_name, c_idx in info_cols.items():
-            if "SGPA" in col_name:
-                sgpa_col = c_idx
-            elif "CGPA" in col_name:
+            if "CGPA" in col_name.upper():
                 cgpa_col = c_idx
+            if "RESULT" in col_name.upper() or "STATUS" in col_name.upper():
+                status_col = c_idx
 
         if sgpa_col is None:
             sgpa_col = 5
-        if cgpa_col is None:
-            cgpa_col = 6
+
+        # Calculate max marks per subject for non-slash integer fields
+        subject_max_marks: Dict[str, int | str] = {}
+        max_row = ws.max_row
+        for sub_name, s_data in subjects.items():
+            f_map = s_data["fields"]
+            tot_col = f_map.get("TOTAL") or f_map.get("Tot") or f_map.get("TOT")
+            has_slash = False
+            if tot_col:
+                v_sample = str(ws.cell(4, tot_col).value or "")
+                if "/" in v_sample:
+                    has_slash = True
+
+            if has_slash:
+                subject_max_marks[sub_name] = "slash"
+            else:
+                max_obt = 0
+                if tot_col:
+                    for r in range(4, max_row + 1):
+                        val = ws.cell(r, tot_col).value
+                        try:
+                            v_num = int(val)
+                            if v_num > max_obt:
+                                max_obt = v_num
+                        except (ValueError, TypeError):
+                            pass
+                if max_obt > 50:
+                    sub_max = 100
+                elif max_obt > 25:
+                    sub_max = 50
+                elif max_obt > 0:
+                    sub_max = 25
+                else:
+                    sub_max = 100
+                subject_max_marks[sub_name] = sub_max
 
         # Extract student records
         students = []
-        max_row = ws.max_row
         for r in range(4, max_row + 1):
             seat = ws.cell(r, seat_col).value
             if not seat:
@@ -98,10 +130,14 @@ class ResultAnalyzer:
             name = str(ws.cell(r, name_col).value or "").strip()
             mother = str(ws.cell(r, mother_col).value or "").strip()
             sgpa_val = ws.cell(r, sgpa_col).value
-            cgpa_val = ws.cell(r, cgpa_col).value
+            cgpa_val = ws.cell(r, cgpa_col).value if cgpa_col else None
+            status_val = ws.cell(r, status_col).value if status_col else ""
 
             sgpa_str = str(sgpa_val).strip() if sgpa_val is not None else "--"
             cgpa_str = str(cgpa_val).strip() if cgpa_val is not None else ""
+            status_str = str(status_val).strip() if status_val is not None else ""
+
+            sgpa_num, is_atkt = self._parse_student_sgpa_and_atkt(sgpa_str, status_str)
 
             # Check marks obtained and max
             tot_obt = 0
@@ -126,17 +162,24 @@ class ResultAnalyzer:
                         student_subject_grades[sub_name] = str(g_val).strip()
 
                 # Marks
-                if "TOTAL" in f_map:
-                    v = str(ws.cell(r, f_map["TOTAL"]).value or "")
+                tot_col = f_map.get("TOTAL") or f_map.get("Tot") or f_map.get("TOT")
+                if tot_col:
+                    v = str(ws.cell(r, tot_col).value or "").strip()
                     if "/" in v:
                         p = v.split("/")
                         if p[0].isdigit() and p[1].isdigit():
                             tot_obt += int(p[0])
                             tot_max += int(p[1])
+                    elif v.isdigit():
+                        obt = int(v)
+                        sm = subject_max_marks.get(sub_name, 100)
+                        if isinstance(sm, int):
+                            tot_obt += obt
+                            tot_max += sm
                 else:
                     for comp in ["TW", "PR", "OR", "TUT"]:
                         if comp in f_map:
-                            v = str(ws.cell(r, f_map[comp]).value or "")
+                            v = str(ws.cell(r, f_map[comp]).value or "").strip()
                             if "/" in v:
                                 p = v.split("/")
                                 if p[0].isdigit() and p[1].isdigit():
@@ -149,6 +192,8 @@ class ResultAnalyzer:
                 "name": name,
                 "mother": mother,
                 "sgpa": sgpa_str,
+                "sgpa_num": sgpa_num,
+                "is_atkt": is_atkt,
                 "cgpa": cgpa_str,
                 "obt": tot_obt,
                 "max": tot_max,
@@ -175,6 +220,69 @@ class ResultAnalyzer:
             "proforma_c": proforma_c_data,
         }
 
+    @staticmethod
+    def _parse_student_sgpa_and_atkt(sgpa_str: str, status_str: str = "") -> Tuple[float | None, bool]:
+        s = str(sgpa_str or "").strip()
+        st = str(status_str or "").strip().upper()
+
+        is_atkt = False
+        if "FAIL" in st or "ATKT" in st or "A.T.K.T" in st:
+            is_atkt = True
+
+        if "----" in s or "---" in s or "--" in s or not s:
+            is_atkt = True
+
+        # Extract semester SGPA values e.g. "(5) 8.86", "(3) 8.41, (4) 8.59", or "8.86"
+        matches = re.findall(r"(?:\((\d+)\)\s*)?(\d+\.\d+|\d+|----|---|--)", s)
+        valid_sgpas: List[Tuple[int, float]] = []
+
+        for sem_str, val_str in matches:
+            if val_str in ["----", "---", "--"]:
+                is_atkt = True
+                continue
+            try:
+                val_f = float(val_str)
+                if val_f > 0:
+                    sem_num = int(sem_str) if sem_str else 0
+                    valid_sgpas.append((sem_num, val_f))
+            except ValueError:
+                pass
+
+        if not valid_sgpas:
+            return None, True
+
+        valid_sgpas.sort(key=lambda x: x[0], reverse=True)
+        latest_sgpa = valid_sgpas[0][1]
+
+        return latest_sgpa, is_atkt
+
+    @staticmethod
+    def _sgpa_column(info_cols: Dict[str, int]) -> int | None:
+        semester_columns = []
+        named_columns = []
+        generic_column = None
+        fallback_column = None
+        for name, column in info_cols.items():
+            normalized = name.strip()
+            if "SGPA" not in normalized.upper():
+                continue
+            fallback_column = column
+            match = re.fullmatch(r"Semester\s+(\d+)\s+SGPA", normalized, re.IGNORECASE)
+            if match:
+                semester_columns.append((int(match.group(1)), column))
+            elif normalized.casefold() == "sgpa":
+                generic_column = column
+            elif not normalized.casefold().startswith("average "):
+                named_columns.append(column)
+
+        if named_columns:
+            return named_columns[-1]
+        if generic_column:
+            return generic_column
+        if semester_columns:
+            return max(semester_columns)[1]
+        return fallback_column
+
     def _extract_metadata(
         self,
         excel_path: Path,
@@ -185,49 +293,21 @@ class ResultAnalyzer:
         stem = excel_path.stem.upper()
         inst = "B.V.C.O.E.W., Pune-43"
         inst_full = "B.V.C.O.E.FOR WOMEN, PUNE.-43."
-        dept = "COMP"
-        class_year = "BE (Computer)"
-        class_year_full = "BE (Computer Engineering)"
-        class_code = "BE COMP"
         exam = "May 2026"
         decl_date = "16/07/2026"
         subm_date = "31/08/2026"
         acad_year = "2025-2026"
 
-        # Detect class from stem or students
-        if "BE" in stem or (students and students[0]["seat"].startswith("B")):
-            class_year = "BE (Computer)" if "COMP" in stem else "BE"
-            class_year_full = "BE (Computer Engineering)" if "COMP" in stem else "BE"
-            class_code = "BE COMP" if "COMP" in stem else "BE"
-            dept = "COMP" if "COMP" in stem else "ENGG"
-        elif "TE" in stem or (students and students[0]["seat"].startswith("T")):
-            class_year = "TE (IT)" if "IT" in stem else "TE (Computer)"
-            class_year_full = "TE (Information Technology)" if "IT" in stem else "TE"
-            class_code = "TE IT" if "IT" in stem else "TE COMP"
-            dept = "IT" if "IT" in stem else "COMP"
-        elif "SE" in stem or (students and students[0]["seat"].startswith("S")):
-            class_year = "SE (Computer)"
-            class_year_full = "SE (Computer Engineering)"
-            class_code = "SE COMP"
-            dept = "COMP"
-
-        if "IT" in stem:
-            dept = "IT"
-            class_code = class_code.replace("COMP", "IT")
-            class_year = class_year.replace("Computer", "IT")
-
-        # Extract from PDF if available
+        pdf_text = ""
         if pdf_path and pdf_path.exists():
             try:
                 import pdfplumber
                 with pdfplumber.open(pdf_path) as pdf:
                     if len(pdf.pages) > 0:
-                        first_text = pdf.pages[0].extract_text() or ""
-                        # Date match
-                        d_match = re.search(r"DATE\s*:\s*(\d{1,2}\s+[A-Z]{3}\s+\d{4})", first_text)
+                        pdf_text = pdf.pages[0].extract_text() or ""
+                        d_match = re.search(r"DATE\s*:\s*(\d{1,2}\s+[A-Z]{3}\s+\d{4})", pdf_text)
                         if d_match:
                             raw_d = d_match.group(1)
-                            # Convert e.g. 16 JUL 2026 to 16/07/2026
                             months = {
                                 "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04",
                                 "MAY": "05", "JUN": "06", "JUL": "07", "AUG": "08",
@@ -237,28 +317,50 @@ class ResultAnalyzer:
                             if len(parts) == 3 and parts[1] in months:
                                 decl_date = f"{int(parts[0]):02d}/{months[parts[1]]}/{parts[2]}"
 
-                        # Exam session
-                        s_match = re.search(r"(SUMMER|WINTER)\s+SESSION[- ]*(\d{4})", first_text)
+                        s_match = re.search(r"(SUMMER|WINTER)\s+SESSION[- ]*(\d{4})", pdf_text)
                         if s_match:
                             season = s_match.group(1)
                             year = s_match.group(2)
                             month_str = "May" if season == "SUMMER" else "Dec"
                             exam = f"{month_str} {year}"
-
-                        # Branch match
-                        b_match = re.search(r"BRANCH CODE:\s*\d+-[A-Z\.\s\(\)]+\(([A-Z\s]+)\)", first_text)
-                        if b_match:
-                            b_str = b_match.group(1).strip()
-                            if "COMPUTER" in b_str:
-                                dept = "COMP"
-                                class_year = f"{class_code.split()[0]} (Computer)"
-                                class_year_full = f"{class_code.split()[0]} (Computer Engineering)"
-                            elif "INFORMATION" in b_str or "IT" in b_str:
-                                dept = "IT"
-                                class_year = f"{class_code.split()[0]} (IT)"
-                                class_year_full = f"{class_code.split()[0]} (Information Technology)"
             except Exception:
                 pass
+
+        # Determine year: FE, SE, TE, BE
+        first_seat = students[0]["seat"] if students else ""
+        if "BE" in stem or first_seat.startswith("B"):
+            yr_code, yr_name, yr_full = "BE", "BE", "BE"
+        elif "TE" in stem or first_seat.startswith("T"):
+            yr_code, yr_name, yr_full = "TE", "TE", "TE"
+        elif "SE" in stem or first_seat.startswith("S"):
+            yr_code, yr_name, yr_full = "SE", "SE", "SE"
+        elif "FE" in stem or first_seat.startswith("F"):
+            yr_code, yr_name, yr_full = "FE", "FE", "FE"
+        else:
+            yr_code, yr_name, yr_full = "BE", "BE", "BE"
+
+        # Determine branch/department: COMP, IT, E&TC
+        combined_text = f"{stem} {pdf_text.upper()}"
+        if "ELECTRONICS" in combined_text or "E&TC" in combined_text or "ETC" in combined_text:
+            dept = "E&TC"
+            dept_name = "E&TC"
+            dept_full = "Electronics & Telecommunication"
+        elif "INFORMATION" in combined_text or "IT" in combined_text:
+            dept = "IT"
+            dept_name = "IT"
+            dept_full = "Information Technology"
+        elif "COMPUTER" in combined_text or "COMP" in combined_text:
+            dept = "COMP"
+            dept_name = "Computer"
+            dept_full = "Computer Engineering"
+        else:
+            dept = "COMP"
+            dept_name = "Computer"
+            dept_full = "Computer Engineering"
+
+        class_code = f"{yr_code} {dept}"
+        class_year = f"{yr_name} ({dept_name})"
+        class_year_full = f"{yr_full} ({dept_full})"
 
         return {
             "institution": inst,
@@ -283,26 +385,31 @@ class ResultAnalyzer:
         hsc = 0
         sc = 0
         pass_class = 0
-        atkt_count = sum(1 for student in students if not str(student.get("cgpa") or "").strip())
+        atkt_count = sum(1 for s in students if s.get("is_atkt", False))
 
         for s in students:
-            cgpa_val = None
-            if s["cgpa"]:
+            if s.get("is_atkt", False):
+                continue
+
+            score = None
+            if s.get("cgpa"):
                 try:
-                    cgpa_val = float(s["cgpa"])
+                    score = float(s["cgpa"])
                 except ValueError:
                     pass
+            if score is None and s.get("sgpa_num") is not None:
+                score = s["sgpa_num"]
 
-            if cgpa_val is not None:
-                if cgpa_val >= 7.75:
+            if score is not None:
+                if score >= 7.75:
                     dist += 1
-                elif cgpa_val >= 6.75:
+                elif score >= 6.75:
                     fc += 1
-                elif cgpa_val >= 6.25:
+                elif score >= 6.25:
                     hsc += 1
-                elif cgpa_val >= 5.50:
+                elif score >= 5.50:
                     sc += 1
-                elif cgpa_val >= 5.00:
+                elif score >= 5.00:
                     pass_class += 1
 
         total_passed_wo = registered - atkt_count
@@ -405,14 +512,10 @@ class ResultAnalyzer:
         return subject_rows
 
     def _calculate_proforma_c(self, students: List[Dict[str, Any]], top_n: int = 3) -> List[Dict[str, Any]]:
-        valid = [s for s in students if s["sgpa"] and s["sgpa"] != "--"]
+        valid = [s for s in students if not s.get("is_atkt", False) and s.get("sgpa_num") is not None]
 
         def sort_key(s):
-            try:
-                sgpa_f = float(s["sgpa"])
-            except ValueError:
-                sgpa_f = 0.0
-            return (sgpa_f, s["cp"], s["obt"])
+            return (s.get("sgpa_num", 0.0), s.get("obt", 0))
 
         valid.sort(key=sort_key, reverse=True)
 
@@ -427,6 +530,7 @@ class ResultAnalyzer:
                 "sgpa": str(s["sgpa"]),
             })
         return toppers
+
 
     def generate_abc(
         self,
@@ -1122,7 +1226,7 @@ class ResultAnalyzer:
                 Paragraph("Name of the student", c_bold),
                 Paragraph("Marks obtained", c_bold),
                 Paragraph("Credit Points obtained", c_bold),
-                Paragraph("Average SGPA", c_bold),
+                Paragraph("SGPA", c_bold),
             ]
         ]
 
