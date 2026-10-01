@@ -56,7 +56,7 @@ class ResultAnalyzer:
             if s2:
                 curr_sub = str(s2).strip()
 
-            if curr_sub == "Student Information" or c <= 6:
+            if curr_sem == "Student Information" or curr_sub == "Student Information":
                 if f:
                     info_cols[str(f).strip()] = c
             else:
@@ -283,7 +283,7 @@ class ResultAnalyzer:
         hsc = 0
         sc = 0
         pass_class = 0
-        atkt_count = 0
+        atkt_count = sum(1 for student in students if not str(student.get("cgpa") or "").strip())
 
         for s in students:
             cgpa_val = None
@@ -293,31 +293,19 @@ class ResultAnalyzer:
                 except ValueError:
                     pass
 
-            sgpa_val = None
-            if s["sgpa"] and s["sgpa"] != "--":
-                try:
-                    sgpa_val = float(s["sgpa"])
-                except ValueError:
-                    pass
-
-            metric = cgpa_val if cgpa_val is not None else sgpa_val
-            if metric is not None:
-                if metric >= 7.75:
+            if cgpa_val is not None:
+                if cgpa_val >= 7.75:
                     dist += 1
-                elif metric >= 6.75:
+                elif cgpa_val >= 6.75:
                     fc += 1
-                elif metric >= 6.25:
+                elif cgpa_val >= 6.25:
                     hsc += 1
-                elif metric >= 5.50:
+                elif cgpa_val >= 5.50:
                     sc += 1
-                elif metric >= 5.00:
+                elif cgpa_val >= 5.00:
                     pass_class += 1
-                else:
-                    atkt_count += 1
-            else:
-                atkt_count += 1
 
-        total_passed_wo = dist + fc + hsc + sc + pass_class
+        total_passed_wo = registered - atkt_count
         total_with_atkt = total_passed_wo + atkt_count
 
         pct_wo = (total_passed_wo / appeared * 100) if appeared > 0 else 0.0
@@ -673,6 +661,8 @@ class ResultAnalyzer:
     def _export_word_to_pdf_com(docx_path: Path, pdf_path: Path) -> bool:
         if os.name != "nt":
             return False
+        import gc
+
         word = None
         doc = None
         co_init = False
@@ -681,7 +671,7 @@ class ResultAnalyzer:
             pythoncom.CoInitialize()
             co_init = True
             import win32com.client
-            word = win32com.client.Dispatch("Word.Application")
+            word = win32com.client.DispatchEx("Word.Application")
             word.Visible = False
             doc = word.Documents.Open(str(docx_path.resolve()))
             # 17 = wdExportFormatPDF
@@ -695,11 +685,14 @@ class ResultAnalyzer:
                     doc.Close(False)
             except Exception:
                 pass
+            doc = None
             try:
                 if word is not None:
                     word.Quit()
             except Exception:
                 pass
+            word = None
+            gc.collect()
             if co_init:
                 try:
                     import pythoncom

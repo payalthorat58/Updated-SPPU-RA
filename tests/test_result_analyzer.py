@@ -8,6 +8,24 @@ from result_analyzer import ResultAnalyzer
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def test_proforma_a_uses_cgpa_for_class_and_atkt():
+    analyzer = ResultAnalyzer()
+    cgpas = ["7.75", "7.74", "6.75", "6.74", "6.25", "6.24", "5.50", "5.49", "", None, "4.90"]
+    students = [
+        {"cgpa": cgpa, "sgpa": "10.00"}
+        for cgpa in cgpas
+    ]
+
+    result = analyzer._calculate_proforma_a(students, {"class_code": "TEST"})
+
+    assert result["dist"] == 1
+    assert result["fc"] == 2
+    assert result["hsc_sc"] == 2
+    assert result["pass_class"] == 1
+    assert result["total_passed_wo"] == 9
+    assert result["with_atkt_str"] == "9+2=11"
+
+
 def test_result_analyzer_generates_abc():
     excel_path = ROOT / "output" / "BE Computer CEGPresult.xlsx"
     if not excel_path.exists():

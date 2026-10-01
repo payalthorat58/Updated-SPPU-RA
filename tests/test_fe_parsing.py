@@ -2,7 +2,10 @@ import unittest
 from collections import OrderedDict
 from pathlib import Path
 import sys
+import tempfile
 from unittest.mock import patch
+
+import openpyxl
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -14,6 +17,7 @@ from parsers.be_result_parser import BeStudentResultParser
 from parsers.granite_fallback_parser import GraniteFallbackParser
 from parsers.text_fallback_parser import TextFallbackParser
 from parsers.ledger_parser import CODE, CollegeLedgerParser
+from result_analyzer import ResultAnalyzer
 from result_validator import assess_result
 from utils import clean_result_value
 
@@ -50,6 +54,62 @@ class FeParsingTests(unittest.TestCase):
         dataframe = ExcelWriter.dataframe(result)
         self.assertNotIn(("Semester 1", subject.label, "CCE"), dataframe.columns)
         self.assertIn(("Semester 1", subject.label, "TW"), dataframe.columns)
+
+    def test_missing_sgpa_is_calculated_in_excel_only_when_all_grades_pass(self) -> None:
+        subject_labels = ["PCC-201 DATA STRUCTURES", "BSC-201 MATHEMATICS"]
+        schema = OrderedDict({
+            "Semester 1": OrderedDict(
+                (label, ["Crd", "Grd", "GP"]) for label in subject_labels
+            ),
+        })
+
+        def make_student(seat_no, first_grade="A", sgpa=None):
+            summary = OrderedDict({"Credits Earned/Total": "5/5", "Total Credit Points": "43"})
+            if sgpa is not None:
+                summary["Semester 1 SGPA"] = sgpa
+            subjects = OrderedDict({
+                subject_labels[0]: SubjectRecord(
+                    "PCC-201", "DATA STRUCTURES", OrderedDict({"Crd": "3", "Grd": first_grade, "GP": "9"})
+                ),
+                subject_labels[1]: SubjectRecord(
+                    "BSC-201", "MATHEMATICS", OrderedDict({"Crd": "2", "Grd": "B", "GP": "8"})
+                ),
+            })
+            return StudentRecord(
+                seat_no=seat_no,
+                semesters=OrderedDict({"Semester 1": subjects}),
+                summary=summary,
+            )
+
+        result = ParsedResult(
+            "College Ledger",
+            "sample.pdf",
+            [
+                make_student("S1"),
+                make_student("S2", first_grade="F"),
+                make_student("S3", first_grade="FF"),
+                make_student("S4", sgpa="7.25"),
+            ],
+            schema,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workbook_path = Path(temp_dir) / "results.xlsx"
+            ExcelWriter().write(result, workbook_path)
+            worksheet = openpyxl.load_workbook(workbook_path, data_only=True)["Results"]
+            sgpa_column = next(
+                column for column in range(1, worksheet.max_column + 1)
+                if worksheet.cell(3, column).value == "Semester 1 SGPA"
+            )
+
+            self.assertEqual(worksheet.cell(4, sgpa_column).value, 8.6)
+            self.assertIsNone(worksheet.cell(5, sgpa_column).value)
+            self.assertIsNone(worksheet.cell(6, sgpa_column).value)
+            self.assertEqual(worksheet.cell(7, sgpa_column).value, "7.25")
+
+            analyzed = ResultAnalyzer().analyze_excel(workbook_path)
+            topper = next(student for student in analyzed["proforma_c"] if student["seat"] == "S1")
+            self.assertEqual(topper["sgpa"], "8.6")
 
     def test_uppercase_ledger_headers_create_distinct_repeated_assessment_fields(self) -> None:
         labels = ["ISE", "ESE", "PR", "OR", "PR", "TW", "ISE", "ESE", "TW", "TOT", "CRD", "ERN", "GRD", "GRD", "CRD"]

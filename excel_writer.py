@@ -1,4 +1,4 @@
-﻿"""Common Excel writer. It is deliberately unaware of PDF layouts."""
+"""Common Excel writer. It is deliberately unaware of PDF layouts."""
 
 from __future__ import annotations
 
@@ -43,7 +43,11 @@ class ExcelWriter:
         # field that is dashes for every student (for example CCE in some
         # 2024 ledgers) still reaches Excel and can look like a broken column.
         active_schema = ExcelWriter._filtered_schema(result)
-        summary_fields = list(dict.fromkeys(field for student in result.students for field in student.summary))
+        calculated_sgpas = [ExcelWriter._missing_semester_sgpas(student) for student in result.students]
+        summary_fields = list(dict.fromkeys(
+            [field for student in result.students for field in student.summary]
+            + [field for values in calculated_sgpas for field in values]
+        ))
         columns = [
             ("Student Information", "", "Seat Number"),
             ("Student Information", "", "PRN"),
@@ -55,7 +59,7 @@ class ExcelWriter:
             for subject, fields in subjects.items():
                 columns.extend((semester, subject, field) for field in fields)
         rows = []
-        for student in result.students:
+        for student, calculated in zip(result.students, calculated_sgpas):
             row = {
                 ("Student Information", "", "Seat Number"): student.seat_no,
                 ("Student Information", "", "PRN"): student.prn,
@@ -64,6 +68,10 @@ class ExcelWriter:
             }
             for key, value in student.summary.items():
                 row[("Student Information", "", key)] = value
+            for key, value in calculated.items():
+                source_value = student.summary.get(key)
+                if source_value is None or str(source_value).strip() in {"", "-", "---", "----"}:
+                    row[("Student Information", "", key)] = value
             for semester, subjects in student.semesters.items():
                 for label, subject in subjects.items():
                     for field, value in subject.fields.items():
@@ -71,6 +79,70 @@ class ExcelWriter:
             rows.append(row)
         return pd.DataFrame(rows, columns=pd.MultiIndex.from_tuples(columns))
 
+    @staticmethod
+    def _missing_semester_sgpas(student):
+        """Calculate only absent semester/year SGPAs from course grade points and credits."""
+
+        def _compute(subjects_map):
+            """Return computed SGPA float, or None if any subject has F/FF or data is missing."""
+            weighted_points = 0.0
+            total_credits = 0.0
+            has_countable = False
+            for subject in subjects_map.values():
+                fields = subject.fields
+                if fields.get("Remark") == "Non-countable credit course":
+                    continue
+                grade = str(fields.get("Grd", "")).strip().upper()
+                if grade in {"F", "FF"}:
+                    return None  # failed subject → no SGPA
+                # Empty/dash grade means not graded yet — skip this subject
+                if not grade or set(grade) == {"-"}:
+                    continue
+                try:
+                    credits = float(fields["Crd"])
+                    grade_point = float(fields["GP"])
+                except (KeyError, TypeError, ValueError):
+                    continue  # Crd or GP missing/dashes — skip this subject
+                if credits <= 0:
+                    continue  # zero-credit subjects don't count toward SGPA
+                has_countable = True
+                weighted_points += grade_point * credits
+                total_credits += credits
+            if has_countable and total_credits > 0:
+                return round(weighted_points / total_credits, 2)
+            return None
+
+        _BLANK = {"", "-", "--", "---", "----"}
+        calculated = {}
+
+        # Per-semester SGPAs (e.g. "Semester 1 SGPA", "Semester 7 SGPA")
+        for semester, subjects in student.semesters.items():
+            summary_field = f"{semester} SGPA"
+            source_value = student.summary.get(summary_field)
+            if source_value is not None and str(source_value).strip() not in _BLANK:
+                continue  # already has a real value from the PDF
+            result = _compute(subjects)
+            if result is not None:
+                calculated[summary_field] = result
+
+        # Year-level SGPAs (e.g. "Fourth Year SGPA") that exist in summary as
+        # dashes/empty — compute from ALL semesters combined.
+        year_fields = [
+            k for k, v in student.summary.items()
+            if k.endswith(" SGPA")
+            and not k.startswith("Semester")
+            and str(v).strip() in _BLANK
+        ]
+        if year_fields:
+            all_subjects = {}
+            for subjects in student.semesters.values():
+                all_subjects.update(subjects)
+            combined = _compute(all_subjects)
+            if combined is not None:
+                for field in year_fields:
+                    calculated[field] = combined
+
+        return calculated
 
 
     @staticmethod
