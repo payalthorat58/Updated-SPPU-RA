@@ -391,14 +391,13 @@ class ResultAnalyzer:
             if s.get("is_atkt", False):
                 continue
 
-            score = None
-            if s.get("cgpa"):
-                try:
-                    score = float(s["cgpa"])
-                except ValueError:
-                    pass
-            if score is None and s.get("sgpa_num") is not None:
-                score = s["sgpa_num"]
+            # Apply distinction and class rules strictly on SGPA (not CGPA):
+            # 7.75 or More: First Class with Distinction
+            # 6.75 to <7.75: First Class
+            # 6.25 to <6.75: Higher Second Class
+            # 5.50 to <6.25: Second Class
+            # <5.50: Pass Class
+            score = s.get("sgpa_num")
 
             if score is not None:
                 if score >= 7.75:
@@ -409,8 +408,10 @@ class ResultAnalyzer:
                     hsc += 1
                 elif score >= 5.50:
                     sc += 1
-                elif score >= 5.00:
+                else:
                     pass_class += 1
+            else:
+                pass_class += 1
 
         total_passed_wo = registered - atkt_count
         total_with_atkt = total_passed_wo + atkt_count
