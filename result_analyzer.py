@@ -251,10 +251,9 @@ class ResultAnalyzer:
         if not valid_sgpas:
             return None, True
 
-        valid_sgpas.sort(key=lambda x: x[0], reverse=True)
-        latest_sgpa = valid_sgpas[0][1]
+        avg_sgpa = round(sum(v[1] for v in valid_sgpas) / len(valid_sgpas), 4)
 
-        return latest_sgpa, is_atkt
+        return avg_sgpa, is_atkt
 
     @staticmethod
     def _sgpa_column(info_cols: Dict[str, int]) -> int | None:
